@@ -1,0 +1,143 @@
+import tkinter as tk
+import tkintermapview as TkinterMapView
+import threading
+import socket
+import statistics
+
+# Global variables store GPS data
+latitude = None
+longitude = None
+
+markers = []
+gps = []
+
+movement = {}
+
+HOST = '10.42.0.1'
+PORT = 5000
+
+
+def send_command(command):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.connect((HOST, PORT))
+        s.sendall(command.encode('utf-8'))
+        print(f"Sent command: {command}")
+
+        if command == 'get_coordinates':
+            data = s.recv(1024)
+            coordinates = data.decode('utf-8')
+            print(f"Received GPS coordinates: {coordinates}")
+            # Split the received coordinates
+            lat, lon = map(float, coordinates.split(',')) # lat= coordinate[0] lon= coordinates[1]
+            # Add the GPS coordinates to the list and plot them on the map
+            get_gps((lat, lon))
+
+
+def listen_for_input():
+    while True:
+        key = input(
+            "Press a key (w/a/s/d/q) to move forward/left/backward/right/stop , Get current coodinates press x : ").lower()
+        if key in movement:
+            continue  # Prevent sending the same command repeatedly
+
+        command = ''
+        if key == 'w':
+            command = 'forward'
+        elif key == 'a':
+            command = 'left'
+        elif key == 's':
+            command = 'backward'
+        elif key == 'd':
+            command = 'right'
+        elif key == 'q':
+            command = 'stop'
+        elif key == 'x':
+            command = 'get_coordinates'
+        else:
+            continue
+
+        movement[key] = True
+        send_command(command)
+
+        input("Press Enter to stop movement...")
+        stop_command = f"stop_{command}"
+        send_command(stop_command)
+        del movement[key]
+
+# GPS Marker Function
+def get_gps(coordinates):
+    global gps
+    gps.insert(0, coordinates)
+    print(f"GPS Markers list: {gps}")
+    
+    # Update the path after add new marker
+    update_marker_gps()
+
+
+# Update Markers on the Map
+def update_marker_gps(lat,lon):
+    global gps
+    
+    # Avg. GPS 
+    if len(gps) == 5:
+        mean_latitude = statistics.mean(lat)
+        mean_longitude = statistics.mean(lon)
+        map_widget.set_marker(mean_latitude,mean_longitude)
+
+    # Pop GPS When > 5
+    if len(gps) > 5:
+        del gps[:]
+    
+    # Draw path GPS markers
+    elif len(gps) > 1:
+        path_points = [(lat, lon) for lat, lon in reversed(gps)]  # Create a list of tuples from the GPS list
+        map_widget.set_path(path_points)
+
+
+# Setting GUI
+root_tk = tk.Tk()
+root_tk.geometry("1200x600")
+root_tk.title("RTK GPS")
+
+# Setting location
+map_widget = TkinterMapView.TkinterMapView(root_tk, width=600, height=600, corner_radius=0)
+map_widget.pack(fill="both", expand=True)
+map_widget.set_tile_server("https://mt0.google.com/vt/lyrs=m&hl=en&x={x}&y={y}&z={z}&s=Ga", max_zoom=22)  # Google normal
+map_widget.set_position(16.472102, 102.825288)
+
+# Function click
+def left_click_event(coordinates_tuple):
+    print("Left click event with Coordinates:", coordinates_tuple)
+
+map_widget.add_left_click_map_command(left_click_event)
+
+def add_marker_event1(coords):
+    print("Right click event with Add marker1:", coords)
+    map_widget.set_marker(coords[0], coords[1], marker_color_outside="orange", marker_color_circle="orange3")
+    markers.insert(0, coords)  # Latitude and Longitude
+    print("List now:", markers)
+
+map_widget.add_right_click_menu_command(label="Add Marker1", command=add_marker_event1, pass_coords=True)
+
+def add_marker_event2(coords):
+    print("Right click event with Add marker2:", coords)
+    map_widget.set_marker(coords[0], coords[1], marker_color_outside="green", marker_color_circle="green3")
+    markers.insert(1, coords)
+    print("List now:", markers)
+
+map_widget.add_right_click_menu_command(label="Add Marker2", command=add_marker_event2, pass_coords=True)
+
+def del_marker(coords):  # Delete all markers
+    map_widget.delete_all_marker()
+    map_widget.delete_all_path()
+    markers.clear()
+    print("Clear Done")
+
+map_widget.add_right_click_menu_command(label="Delete Markers", command=del_marker, pass_coords=True)
+
+# Run the input listener in a separate thread
+input_thread = threading.Thread(target=listen_for_input)
+input_thread.start()
+
+# Start the Tkinter main loop
+root_tk.mainloop()

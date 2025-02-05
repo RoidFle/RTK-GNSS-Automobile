@@ -1,0 +1,174 @@
+import socket
+import serial
+import RPi.GPIO as GPIO
+import time
+import statistics
+
+# Server setup
+HOST = '0.0.0.0'  # Listen on all network interfaces
+PORT = 5000       # Arbitrary non-privileged port
+
+# Serial configuration for GPS
+Serial_port = '/dev/ttyUSB0'
+baud = 9600
+gps_timeout = None
+
+# GPIO Pin setup for motors
+ENA = 2
+IN1 = 3
+IN2 = 4
+ENB = 17
+IN3 = 27
+IN4 = 22
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(ENA, GPIO.OUT)
+GPIO.setup(IN1, GPIO.OUT)
+GPIO.setup(IN2, GPIO.OUT)
+GPIO.setup(ENB, GPIO.OUT)
+GPIO.setup(IN3, GPIO.OUT)
+GPIO.setup(IN4, GPIO.OUT)
+
+left_pwm = GPIO.PWM(ENA, 100)  # 100 Hz frequency
+right_pwm = GPIO.PWM(ENB, 100)  # 100 Hz frequency
+
+left_pwm.start(0)  # Start with 0% duty cycle
+right_pwm.start(0)  # Start with 0% duty cycle
+
+# Motor control functions
+def move_forward(speed=100):
+    GPIO.output(IN1, GPIO.HIGH)
+    GPIO.output(IN2, GPIO.LOW)
+    GPIO.output(IN3, GPIO.HIGH)
+    GPIO.output(IN4, GPIO.LOW)
+    left_pwm.ChangeDutyCycle(speed)
+    right_pwm.ChangeDutyCycle(speed)
+
+def move_backward(speed=100):
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.HIGH)
+    GPIO.output(IN3, GPIO.LOW)
+    GPIO.output(IN4, GPIO.HIGH)
+    left_pwm.ChangeDutyCycle(speed)
+    right_pwm.ChangeDutyCycle(speed)
+
+def turn_left(speed=100):
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.HIGH)
+    GPIO.output(IN3, GPIO.HIGH)
+    GPIO.output(IN4, GPIO.LOW)
+    left_pwm.ChangeDutyCycle(speed)
+    right_pwm.ChangeDutyCycle(speed)
+
+def turn_right(speed=100):
+    GPIO.output(IN1, GPIO.HIGH)
+    GPIO.output(IN2, GPIO.LOW)
+    GPIO.output(IN3, GPIO.LOW)
+    GPIO.output(IN4, GPIO.HIGH)
+    left_pwm.ChangeDutyCycle(speed)
+    right_pwm.ChangeDutyCycle(speed)
+
+def stop():
+    left_pwm.ChangeDutyCycle(0)
+    right_pwm.ChangeDutyCycle(0)
+
+# GPS handling class
+class GPS:
+    def __init__(self, latitude=0.0, longitude=0.0):
+        self.latitude = latitude
+        self.longitude = longitude
+
+    def read_serial_data(self):
+        try:
+            ser = serial.Serial(Serial_port, baud, timeout=gps_timeout)
+            print(f"GPS Serial port: {ser.name}")
+            while True:
+                if ser.in_waiting > 0:
+                    line = ser.readline().decode("utf-8").strip()
+                    data = line.split(",")
+                    if len(data) < 7 or data[0] != '$GPRMC':
+                        continue
+
+                    lat_nmea, long_nmea = data[3], data[5]
+                    latitude = self._convert_to_degrees(lat_nmea, data[4] == 'S')
+                    longitude = self._convert_to_degrees(long_nmea, data[6] == 'W')
+
+                    self.latitude = latitude
+                    self.longitude = longitude
+                    #print(f"Latitude: {latitude}, Longitude: {longitude}")
+                    return latitude, longitude
+        except serial.SerialException as e:
+            print(f"Error reading GPS data: {e}")
+
+    def _convert_to_degrees(self, nmea_data, is_negative):
+        if len(nmea_data) < 4:
+            return 0.0
+        degree = float(nmea_data[:2 if len(nmea_data) == 9 else 3])
+        minutes = float(nmea_data[2:]) / 60
+        return (degree + minutes) * (-1 if is_negative else 1)
+
+# GPS Marker handling
+gps = []
+
+def gps_manage_time(latitude, longitude):
+    oldtime = time.time()  # เริ่มต้นด้วยเวลาปัจจุบัน   
+    while True:
+        newtime = time.time()  # เวลาปัจจุบัน
+        if newtime - oldtime >= 5:  # Delay 5 วิ
+            gps.insert(0, (latitude, longitude))
+            print(f"GPS list: {gps}")                   
+            # รีเซ็ตเวลาเริ่มต้นใหม่
+            oldtime = newtime
+
+# Handle incoming control commands from client
+def handle_control(conn, addr, gps):
+    print(f"Connected by {addr}")
+    with conn:
+        while True:
+            data = conn.recv(1024)
+            if not data:
+                break
+            command = data.decode('utf-8').strip()
+            if command == 'forward':
+                move_forward()
+            elif command == 'backward':
+                move_backward()
+            elif command == 'left':
+                turn_left()
+            elif command == 'right':
+                turn_right()
+            elif command == 'stop':
+                stop()
+            elif command == 'get_coordinates':
+                latitude, longitude = gps.read_serial_data()
+                gps_manage_time(latitude, longitude)
+                
+                # Check if there are enough markers to calculate the mean
+                if len(gps) == 5:
+                    mean_latitude = statistics.mean([lat for lat, _ in gps])
+                    mean_longitude = statistics.mean([lon for _, lon in gps])
+                    print(f"Mean Latitude: {mean_latitude}, Mean Longitude: {mean_longitude}")
+                    gps_data = f"{mean_latitude},{mean_longitude}"
+                
+                conn.sendall(gps_data.encode('utf-8'))
+                print(f"Sent coordinates: {gps_data}")
+
+
+# Main server loop
+def start_server():
+    gps = GPS()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((HOST, PORT))
+            s.listen()
+            print(f"Server listening on {HOST}:{PORT}")
+            while True:
+                conn, addr = s.accept()
+                handle_control(conn, addr, gps)
+    except Exception as e:
+        print(f"Server error: {e}")
+    finally:
+        GPIO.cleanup()
+
+# Start the server
+start_server()
